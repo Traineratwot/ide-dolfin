@@ -9,6 +9,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_MENU_DIR="$HOME/.local/share/kio/servicemenus"
+ICON_THEME_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
+ICON_PREFIX="ide-dolfin"
 DESKTOP_FILE="open-in-ide.desktop"
 LAUNCHER_SCRIPT="open-in-ide-launcher.sh"
 
@@ -29,50 +31,110 @@ detect_ides() {
     bash "$SCRIPT_DIR/detect-ides.sh"
 }
 
+# --- Icon installation ---
+install_icon() {
+    local ide_type="$1"
+    local ide_name="$2"
+    local exec_path="$3"
+
+    local icon_name=""
+    local icon_source=""
+
+    case "$ide_type" in
+        vscode)
+            # VS Code: use system icon if available
+            if [ -f /usr/share/pixmaps/vscode.png ]; then
+                icon_name="vscode"
+                # Don't copy — system icon already exists
+                echo "$icon_name"
+                return
+            fi
+            # Fallback: check for icon in the project's icons/ dir
+            local vs_icon="$SCRIPT_DIR/icons/vscode.svg"
+            if [ -f "$vs_icon" ]; then
+                icon_name="${ICON_PREFIX}-vscode"
+                mkdir -p "$ICON_THEME_DIR"
+                cp "$vs_icon" "$ICON_THEME_DIR/${icon_name}.svg"
+                echo "$icon_name"
+                return
+            fi
+            echo "vscode"
+            return
+            ;;
+        jetbrains)
+            # JetBrains: find icon in IDE's bin/ directory
+            local ide_dir
+            ide_dir=$(dirname "$(dirname "$exec_path")")
+
+            # Try SVG first, then PNG
+            for ext in svg png; do
+                local candidate="$ide_dir/bin/${ide_name,,}.$ext"
+                # Also try lowercase without spaces
+                if [ -f "$candidate" ]; then
+                    icon_name="${ICON_PREFIX}-${ide_name,,}"
+                    icon_source="$candidate"
+                    break
+                fi
+            done
+
+            # Fallback: find any icon in bin/
+            if [ -z "$icon_source" ]; then
+                icon_source=$(find "$ide_dir/bin" -maxdepth 1 \( -name "*.svg" -o -name "*.png" \) 2>/dev/null | head -1)
+                if [ -n "$icon_source" ]; then
+                    local base
+                    base=$(basename "$icon_source")
+                    icon_name="${ICON_PREFIX}-${base%.*}"
+                fi
+            fi
+
+            # Fallback: bundled icons
+            if [ -z "$icon_source" ]; then
+                local bundled="$SCRIPT_DIR/icons/${ide_name,,}.svg"
+                if [ -f "$bundled" ]; then
+                    icon_source="$bundled"
+                    icon_name="${ICON_PREFIX}-${ide_name,,}"
+                fi
+            fi
+
+            if [ -n "$icon_source" ] && [ -f "$icon_source" ]; then
+                mkdir -p "$ICON_THEME_DIR"
+                cp "$icon_source" "$ICON_THEME_DIR/${icon_name}.$(basename "$icon_source" | sed 's/.*\.//')"
+                echo "$icon_name"
+                return
+            fi
+
+            # Last resort: generic JetBrains icon
+            echo "jetbrains"
+            return
+            ;;
+    esac
+}
+
+remove_installed_icons() {
+    # Remove icons we installed (prefixed with ide-dolfin-)
+    find "$ICON_THEME_DIR" -name "${ICON_PREFIX}-*" -delete 2>/dev/null || true
+}
+
 # --- Generate .desktop file ---
 generate_desktop_file() {
     local ide_list="$1"
+    local icon_list="$2"
 
     local actions=""
     local sections=""
-    local idx=0
 
+    local i=0
     while IFS='|' read -r type name exec_path; do
         [ -z "$type" ] && continue
-        idx=$((idx + 1))
+        i=$((i + 1))
 
         # Create safe action identifier
         local action_id
         action_id=$(echo "$name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g; s/--*/-/g; s/^-//; s/-$//')
 
-        # Icon mapping
-        local icon=""
-        case "$type" in
-            vscode)
-                case "$name" in
-                    *Insiders*) icon="vscode-insiders" ;;
-                    *)          icon="visual-studio-code" ;;
-                esac
-                ;;
-            jetbrains)
-                case "$name" in
-                    *IntelliJ*)     icon="intellij-idea" ;;
-                    *PyCharm*)      icon="pycharm" ;;
-                    *WebStorm*)     icon="webstorm" ;;
-                    *CLion*)        icon="clion" ;;
-                    *GoLand*)       icon="goland" ;;
-                    *PhpStorm*)     icon="phpstorm" ;;
-                    *Rider*)        icon="rider" ;;
-                    *RustRover*)    icon="rustrover" ;;
-                    *DataGrip*)     icon="datagrip" ;;
-                    *Aqua*)         icon="aqua" ;;
-                    *DataSpell*)    icon="dataspell" ;;
-                    *Gateway*)      icon="gateway" ;;
-                    *Air*)          icon="jetbrains" ;;
-                    *)              icon="jetbrains" ;;
-                esac
-                ;;
-        esac
+        # Get icon name from the icon list (same order)
+        local icon
+        icon=$(echo "$icon_list" | sed -n "${i}p")
 
         # Build action section
         if [ -n "$actions" ]; then
@@ -82,8 +144,7 @@ generate_desktop_file() {
 
         sections="${sections}
 [Desktop Action ${action_id}]
-Name=${name}
-Name[ru]=${name}
+Name=Открыть в ${name}
 Icon=${icon}
 Exec=${SERVICE_MENU_DIR}/${LAUNCHER_SCRIPT} '${exec_path}' %u
 "
@@ -97,8 +158,29 @@ MimeType=all/all;inode/directory;
 Actions=${actions}
 X-KDE-Submenu=Открыть в IDE
 X-KDE-Priority=TopLevel
+Icon=${ICON_PREFIX}-menu
 ${sections}
 DESKTOP_EOF
+}
+
+# --- Install menu icon ---
+install_menu_icon() {
+    # Try to create a combined menu icon from bundled assets
+    local menu_icon="$SCRIPT_DIR/icons/menu.svg"
+    if [ -f "$menu_icon" ]; then
+        mkdir -p "$ICON_THEME_DIR"
+        cp "$menu_icon" "$ICON_THEME_DIR/${ICON_PREFIX}-menu.svg"
+        return
+    fi
+
+    # Fallback: use the first detected IDE's icon as menu icon
+    local first_icon
+    first_icon=$(find "$ICON_THEME_DIR" -name "${ICON_PREFIX}-*" 2>/dev/null | head -1)
+    if [ -n "$first_icon" ]; then
+        local ext
+        ext=$(basename "$first_icon" | sed 's/.*\.//')
+        cp "$first_icon" "$ICON_THEME_DIR/${ICON_PREFIX}-menu.$ext"
+    fi
 }
 
 # --- Install ---
@@ -129,20 +211,46 @@ do_install() {
     done
     echo ""
 
-    # Create service menu directory if needed
+    # Create directories
     mkdir -p "$SERVICE_MENU_DIR"
+    mkdir -p "$ICON_THEME_DIR"
 
-    # Copy launcher script
+    # Install launcher script
     info "Installing launcher script..."
     cp "$SCRIPT_DIR/$LAUNCHER_SCRIPT" "$SERVICE_MENU_DIR/$LAUNCHER_SCRIPT"
     chmod +x "$SERVICE_MENU_DIR/$LAUNCHER_SCRIPT"
-    ok "Launcher installed to $SERVICE_MENU_DIR/$LAUNCHER_SCRIPT"
+    ok "Launcher installed"
+
+    # Install icons for each IDE
+    info "Installing icons..."
+    local icon_list=""
+    while IFS='|' read -r type name exec_path; do
+        [ -z "$type" ] && continue
+        local icon_name
+        icon_name=$(install_icon "$type" "$name" "$exec_path")
+        if [ -n "$icon_list" ]; then
+            icon_list="${icon_list}
+${icon_name}"
+        else
+            icon_list="$icon_name"
+        fi
+        ok "Icon for $name: $icon_name"
+    done <<< "$ide_list"
+
+    # Install menu icon
+    install_menu_icon
+    ok "Menu icon installed"
+
+    # Update icon cache
+    if command -v gtk-update-icon-cache &>/dev/null; then
+        gtk-update-icon-cache -f -t "$ICON_THEME_DIR/.." 2>/dev/null || true
+    fi
 
     # Generate and install .desktop file
     info "Generating .desktop file..."
-    generate_desktop_file "$ide_list"
+    generate_desktop_file "$ide_list" "$icon_list"
     chmod +x "$SERVICE_MENU_DIR/$DESKTOP_FILE"
-    ok "Service menu installed to $SERVICE_MENU_DIR/$DESKTOP_FILE"
+    ok "Service menu installed"
 
     # Rebuild KDE service cache (non-fatal if fails)
     if command -v kbuildsycoca6 &>/dev/null; then
@@ -173,6 +281,19 @@ do_uninstall() {
         rm "$SERVICE_MENU_DIR/$LAUNCHER_SCRIPT"
         ok "Removed $LAUNCHER_SCRIPT"
         removed=1
+    fi
+
+    # Remove installed icons
+    local icon_count
+    icon_count=$(find "$ICON_THEME_DIR" -name "${ICON_PREFIX}-*" 2>/dev/null | wc -l)
+    if [ "$icon_count" -gt 0 ]; then
+        remove_installed_icons
+        ok "Removed $icon_count icon(s)"
+        removed=1
+        # Update icon cache
+        if command -v gtk-update-icon-cache &>/dev/null; then
+            gtk-update-icon-cache -f -t "$ICON_THEME_DIR/.." 2>/dev/null || true
+        fi
     fi
 
     if [ "$removed" -eq 0 ]; then
@@ -207,6 +328,14 @@ do_status() {
         ok "Service menu: installed ($SERVICE_MENU_DIR/$DESKTOP_FILE)"
     else
         warn "Service menu: not installed"
+    fi
+
+    local icon_count
+    icon_count=$(find "$ICON_THEME_DIR" -name "${ICON_PREFIX}-*" 2>/dev/null | wc -l)
+    if [ "$icon_count" -gt 0 ]; then
+        ok "Icons: $icon_count installed"
+    else
+        warn "Icons: none installed"
     fi
 }
 
