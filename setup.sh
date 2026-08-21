@@ -13,6 +13,8 @@ ICON_THEME_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
 ICON_PREFIX="ide-dolfin"
 DESKTOP_FILE="open-in-ide.desktop"
 LAUNCHER_SCRIPT="open-in-ide-launcher.sh"
+SHELL_MARKER_START="# ide-dolfin start"
+SHELL_MARKER_END="# ide-dolfin end"
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -29,6 +31,145 @@ err()   { echo -e "${RED}[ERROR]${NC} $*"; }
 # --- Detect IDEs ---
 detect_ides() {
     bash "$SCRIPT_DIR/detect-ides.sh"
+}
+
+# --- JetBrains command name → launcher script mapping ---
+declare -A JB_CMD_MAP=(
+    ["IntelliJ IDEA"]="idea.sh"
+    ["IntelliJ IDEA CE"]="idea.sh"
+    ["PyCharm"]="pycharm.sh"
+    ["PyCharm CE"]="pycharm.sh"
+    ["WebStorm"]="webstorm.sh"
+    ["CLion"]="clion.sh"
+    ["GoLand"]="goland.sh"
+    ["PhpStorm"]="phpstorm.sh"
+    ["Rider"]="rider.sh"
+    ["RustRover"]="rustrover.sh"
+    ["DataGrip"]="datagrip.sh"
+    ["Aqua"]="aqua.sh"
+    ["DataSpell"]="dataspell.sh"
+    ["Gateway"]="gateway.sh"
+    ["JetBrains Air"]="air.sh"
+)
+
+# --- Generate shell wrapper functions ---
+generate_shell_wrappers() {
+    local ide_list="$1"
+    local block=""
+
+    block+="$SHELL_MARKER_START\n"
+
+    # VS Code wrapper
+    block+="ide_code() {\n"
+    block+="  local bin\n"
+    block+="  bin=\$(command -v code 2>/dev/null)\n"
+    block+="  if [ -n \"\$bin\" ]; then\n"
+    block+="    \"\$bin\" \"\$@\"\n"
+    block+="  else\n"
+    block+="    echo \"code: VS Code not found — install it or run setup.sh\" >&2\n"
+    block+="    return 1\n"
+    block+="  fi\n"
+    block+="}\n"
+    block+="alias code='ide_code'\n\n"
+
+    # JetBrains wrappers
+    while IFS='|' read -r type name exec_path; do
+        [ -z "$type" ] && continue
+        [ "$type" != "jetbrains" ] && continue
+
+        local launcher="${JB_CMD_MAP[$name]:-}"
+        [ -z "$launcher" ] && continue
+
+        local cmd_name="${launcher%.sh}"
+
+        block+="${cmd_name}() {\n"
+        block+="  local script\n"
+        block+="  script=\$(find \"\$HOME/.local/share/JetBrains/Toolbox/apps\" -path \"*/bin/${launcher}\" -type f -executable 2>/dev/null | head -1)\n"
+        block+="  if [ -z \"\$script\" ]; then\n"
+        block+="    script=\"${exec_path}\"\n"
+        block+="  fi\n"
+        block+="  if [ -n \"\$script\" ] && [ -x \"\$script\" ]; then\n"
+        block+="    \"\$script\" \"\$@\"\n"
+        block+="  else\n"
+        block+="    echo \"${cmd_name}: not found — run setup.sh to reinstall\" >&2\n"
+        block+="    return 1\n"
+        block+="  fi\n"
+        block+="}\n\n"
+    done <<< "$ide_list"
+
+    block+="$SHELL_MARKER_END"
+
+    echo -e "$block"
+}
+
+# --- Install shell wrappers ---
+install_shell_aliases() {
+    local ide_list="$1"
+    local wrappers
+    wrappers=$(generate_shell_wrappers "$ide_list")
+
+    if [ -z "$wrappers" ]; then
+        return
+    fi
+
+    local files_to_update=()
+
+    [ -f "$HOME/.bashrc" ] && files_to_update+=("$HOME/.bashrc")
+
+    if [ -f "$HOME/.zshrc.local" ]; then
+        files_to_update+=("$HOME/.zshrc.local")
+    elif [ -f "$HOME/.zshrc" ]; then
+        files_to_update+=("$HOME/.zshrc")
+    fi
+
+    if [ ${#files_to_update[@]} -eq 0 ]; then
+        warn "No shell profile found (.bashrc / .zshrc) — skipping shell wrappers"
+        return
+    fi
+
+    for profile in "${files_to_update[@]}"; do
+        # Remove old block if exists (idempotent)
+        remove_block_from_file "$profile"
+        # Append new block
+        echo "" >> "$profile"
+        echo "$wrappers" >> "$profile"
+        ok "Shell wrappers added to $(basename "$profile")"
+    done
+}
+
+# --- Remove shell wrapper block from a file ---
+remove_block_from_file() {
+    local file="$1"
+    [ -f "$file" ] || return
+
+    if grep -qF "$SHELL_MARKER_START" "$file" 2>/dev/null; then
+        # Use sed to remove the block between markers (inclusive)
+        sed -i "/$SHELL_MARKER_START/,/$SHELL_MARKER_END/d" "$file"
+        # Remove trailing blank lines that sed may leave
+        sed -i -e :a -e '/^\n*$/{$d;N;ba;}' "$file"
+        ok "Removed shell wrappers from $(basename "$file")"
+    fi
+}
+
+# --- Remove all shell wrappers ---
+remove_shell_aliases() {
+    local files_to_check=()
+
+    [ -f "$HOME/.bashrc" ] && files_to_check+=("$HOME/.bashrc")
+    [ -f "$HOME/.zshrc.local" ] && files_to_check+=("$HOME/.zshrc.local")
+    [ -f "$HOME/.zshrc" ] && files_to_check+=("$HOME/.zshrc")
+
+    local removed=0
+    for profile in "${files_to_check[@]}"; do
+        if grep -qF "$SHELL_MARKER_START" "$profile" 2>/dev/null; then
+            remove_block_from_file "$profile"
+            removed=1
+        fi
+    done
+
+    if [ "$removed" -eq 1 ]; then
+        ok "Shell wrappers removed"
+    fi
 }
 
 # --- Icon installation ---
@@ -260,14 +401,22 @@ ${icon_name}"
         warn "kbuildsycoca6 not found — restart Dolphin manually if menu doesn't appear"
     fi
 
+    # Install shell wrappers for terminal launch
+    info "Installing shell wrappers..."
+    install_shell_aliases "$ide_list"
+
     echo ""
     ok "Installation complete!"
     echo "Right-click any file or directory in Dolphin → 'Открыть в IDE'"
+    echo "Terminal: use 'phpstorm .', 'idea .', 'code .' etc."
 }
 
 # --- Uninstall ---
 do_uninstall() {
     info "Removing service menu..."
+
+    # Remove shell wrappers
+    remove_shell_aliases
 
     local removed=0
 
