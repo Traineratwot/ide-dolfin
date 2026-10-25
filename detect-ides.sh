@@ -7,18 +7,24 @@ set -euo pipefail
 
 # --- VS Code ---
 find_vscode() {
-    local paths=(
-        "code"
-        "/usr/bin/code"
-        "/snap/bin/code"
-        "/usr/local/bin/code"
-    )
-    for p in "${paths[@]}"; do
-        if command -v "$p" &>/dev/null || [ -x "$p" ]; then
-            echo "vscode|Visual Studio Code|$p"
+    local p bin
+    for p in \
+        "/usr/bin/code" \
+        "/snap/bin/code" \
+        "/usr/local/bin/code" \
+        "$HOME/.local/bin/code"
+    do
+        if [ -x "$p" ]; then
+            echo "vscode|Visual Studio Code|$(realpath "$p")"
             return
         fi
     done
+
+    bin=$(command -v code 2>/dev/null || true)
+    if [ -n "$bin" ] && [ -x "$bin" ]; then
+        echo "vscode|Visual Studio Code|$(realpath "$bin")"
+        return
+    fi
 
     # Flatpak
     if command -v flatpak &>/dev/null; then
@@ -29,13 +35,75 @@ find_vscode() {
     fi
 
     # Code Insiders
-    for p in "code-insiders" "/usr/bin/code-insiders" "/snap/bin/code-insiders"; do
-        if command -v "$p" &>/dev/null || [ -x "$p" ]; then
-            echo "vscode|Visual Studio Code Insiders|$p"
+    for p in \
+        "/usr/bin/code-insiders" \
+        "/snap/bin/code-insiders" \
+        "/usr/local/bin/code-insiders"
+    do
+        if [ -x "$p" ]; then
+            echo "vscode|Visual Studio Code Insiders|$(realpath "$p")"
             return
         fi
     done
+    bin=$(command -v code-insiders 2>/dev/null || true)
+    if [ -n "$bin" ] && [ -x "$bin" ]; then
+        echo "vscode|Visual Studio Code Insiders|$(realpath "$bin")"
+        return
+    fi
 }
+
+# --- Orca IDE ---
+# AppImage / orca-ide launcher. Never use /usr/bin/orca — that is the
+# GNOME screen reader, not the Orca IDE.
+find_orca() {
+    local exec="" desk line
+
+    for desk in \
+        "$HOME/.local/share/applications/orca.desktop" \
+        "$HOME/.local/share/applications/Orca.desktop" \
+        "/usr/share/applications/orca.desktop"
+    do
+        [ -f "$desk" ] || continue
+        # Prefer TryExec (single absolute path to the AppImage)
+        line=$(grep -m1 '^TryExec=' "$desk" 2>/dev/null | cut -d= -f2- | tr -d '\r')
+        if [ -n "$line" ] && [ -x "$line" ]; then
+            exec="$line"
+            break
+        fi
+        # Fall back to Exec=... (strip env/VAR= and field codes)
+        line=$(grep -m1 '^Exec=' "$desk" 2>/dev/null | cut -d= -f2- | tr -d '\r')
+        line=$(sed -E 's/^[[:space:]]*env[[:space:]]+//; s/[[:space:]]+%[fFuU][[:space:]]*$//; s/%[fFuU][[:space:]]*$//' <<<"$line")
+        # Drop leading VAR=value tokens (e.g. DESKTOPINTEGRATION=1)
+        while [[ "$line" == *=* && "$line" != /* && "$line" != "~"* ]]; do
+            line="${line#* }"
+        done
+        line="${line%% *}"
+        if [ -n "$line" ] && [ -x "$line" ]; then
+            exec="$line"
+            break
+        fi
+        break
+    done
+
+    if [ -z "$exec" ] || [ ! -x "$exec" ]; then
+        local p
+        for p in \
+            "$HOME/AppImages/orca.appimage" \
+            "$HOME/AppImages/Orca.appimage" \
+            "$HOME/AppImages/orca.AppImage"
+        do
+            if [ -x "$p" ] && [ -f "$p" ]; then
+                exec="$p"
+                break
+            fi
+        done
+    fi
+
+    [ -n "$exec" ] && [ -x "$exec" ] && echo "orca|Orca|$(realpath "$exec")"
+}
+
+# Orca is launched through open-in-orca.sh (project-aware), not the raw
+# AppImage — AppImage args are ignored by Orca 1.4.x.
 
 # --- JetBrains IDEs ---
 # Maps directory name (both cases) -> display name
@@ -172,6 +240,7 @@ find_jetbrains_manual() {
 # --- Main ---
 {
     find_vscode
+    find_orca
     find_jetbrains_toolbox
     find_jetbrains_manual
 } | sort -u -t'|' -k2,2 | sed 's|//+|/|g'
